@@ -1700,8 +1700,8 @@ static common_chat_params common_chat_templates_apply_jinja(
         return common_chat_params_init_command_r7b(tmpl, params);
     }
 
-    // Hermes 2/3 Pro, Qwen 2.5 Instruct
-    if (src.find("<tool_call>") != std::string::npos && params.json_schema.is_null()) {
+    // Hermes 2/3 Pro, Qwen 2.5 Instruct (w/ tools)
+    if (src.find("<tool_call>") != std::string::npos && params.json_schema.is_null() && params.tools.is_array() && params.json_schema.is_null()) {
         return common_chat_params_init_hermes_2_pro(tmpl, params);
     }
 
