@@ -93,6 +93,20 @@ static void test_json_healing() {
     R"({"a":"$foo"})",
     R"("$foo)"
   );
+  test(
+    {
+      R"({)",
+    },
+    R"({"$foo":1})",
+    R"("$foo)"
+  );
+  test(
+    {
+      R"([)",
+    },
+    R"(["$foo"])",
+    R"("$foo)"
+  );
   // Healing right after a full literal
   test(
     {

@@ -68,7 +68,7 @@ bool common_chat_msg_parser::add_tool_calls(const json & arr) {
 }
 void common_chat_msg_parser::finish() {
     if (!is_partial_ && pos_ != input_.size()) {
-        throw std::runtime_error("Unexpected content at end of input: " + input_.substr(pos_));
+        throw std::runtime_error("Unexpected content at end of input");// + input_.substr(pos_));
     }
 }
 
