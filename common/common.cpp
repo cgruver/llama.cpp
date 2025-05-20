@@ -1102,6 +1102,9 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
         mparams.tensor_buft_overrides = params.tensor_buft_overrides.data();
     }
 
+    mparams.progress_callback           = params.load_progress_callback;
+    mparams.progress_callback_user_data = params.load_progress_callback_user_data;
+
     return mparams;
 }
 
@@ -1133,6 +1136,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.flash_attn        = params.flash_attn;
     cparams.no_perf           = params.no_perf;
     cparams.op_offload        = !params.no_op_offload;
+    cparams.swa_full          = params.swa_full;
 
     if (params.reranking) {
         cparams.embeddings    = true;

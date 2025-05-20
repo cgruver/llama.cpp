@@ -323,6 +323,7 @@ struct common_params {
     bool flash_attn        = false; // flash attention
     bool no_perf           = false; // disable performance metrics
     bool ctx_shift         = true;  // context shift on inifinite text generation
+    bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
 
     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
     bool use_mmap          = true;  // use mmap for faster loads
@@ -428,6 +429,11 @@ struct common_params {
 
     // common params
     std::string out_file; // output filename for all example programs
+    // optional callback for model loading progress and cancellation:
+    // called with a progress value between 0.0 and 1.0.
+    // return false from callback to abort model loading or true to continue
+    llama_progress_callback load_progress_callback = NULL;
+    void *                  load_progress_callback_user_data = NULL;
 };
 
 // call once at the start of a program if it uses libcommon
