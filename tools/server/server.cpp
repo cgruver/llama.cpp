@@ -958,7 +958,6 @@ struct server_task_result_cmpl_partial : server_task_result {
     }
 
     json to_json_oaicompat_chat() {
-        GGML_ASSERT(n_decoded > 0);
         bool first = n_decoded == 1;
         std::time_t t = std::time(0);
         json choices;
@@ -1125,9 +1124,6 @@ struct server_task_result_metrics : server_task_result {
     int n_tasks_deferred;
     int64_t t_start;
 
-    int32_t kv_cache_tokens_count;
-    int32_t kv_cache_used_cells;
-
     // TODO: somehow reuse server_metrics in the future, instead of duplicating the fields
     uint64_t n_prompt_tokens_processed_total = 0;
     uint64_t t_prompt_processing_total       = 0;
@@ -1166,9 +1162,6 @@ struct server_task_result_metrics : server_task_result {
 
             { "n_decode_total",                  n_decode_total },
             { "n_busy_slots_total",              n_busy_slots_total },
-
-            { "kv_cache_tokens_count",           kv_cache_tokens_count },
-            { "kv_cache_used_cells",             kv_cache_used_cells },
 
             { "slots",                           slots_data },
         };
@@ -2783,9 +2776,6 @@ struct server_context {
                     res->n_tasks_deferred    = queue_tasks.queue_tasks_deferred.size();
                     res->t_start             = metrics.t_start;
 
-                    res->kv_cache_tokens_count = llama_kv_self_n_tokens(ctx);
-                    res->kv_cache_used_cells   = llama_kv_self_used_cells(ctx);
-
                     res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
                     res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                     res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
@@ -3348,6 +3338,37 @@ struct server_context {
             common_set_adapter_lora(ctx, slot_batched->lora);
         }
 
+        const bool do_encode = (params_base.embedding || params_base.reranking);
+
+        // pad the batch so that batch.n_tokens >= n_slots
+        // TODO: temporary workaround for https://github.com/ggml-org/llama.cpp/issues/13689
+        if (do_encode) {
+            const int n_slots = slots.size();
+
+            if (batch.n_tokens < n_slots) {
+                std::set<llama_seq_id> seq_ids;
+                for (int j = 0; j < batch.n_tokens; ++j) {
+                    seq_ids.insert(batch.seq_id[j][0]);
+                }
+
+                // find unused sequence id
+                llama_seq_id seq_id = -1;
+                for (int i = 0; i < n_slots; ++i) {
+                    if (seq_ids.find(i) == seq_ids.end()) {
+                        seq_id = i;
+                    }
+                }
+
+                const int n_add = n_slots - batch.n_tokens;
+
+                SRV_WRN("adding %d dummy tokens to the batch, seq_id = %d\n", n_add, seq_id);
+
+                for (int j = 0; j < n_add; ++j) {
+                    common_batch_add(batch, 0, j, { seq_id }, false);
+                }
+            }
+        }
+
         // process the created batch of tokens
         for (int32_t i = 0; i < batch.n_tokens; i += n_batch) {
             const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
@@ -3364,7 +3385,7 @@ struct server_context {
 
             int ret = 0;
 
-            if (params_base.embedding || params_base.reranking) {
+            if (do_encode) {
                 ret = llama_encode(ctx, batch_view);
             } else {
                 ret = llama_decode(ctx, batch_view);
@@ -3373,14 +3394,29 @@ struct server_context {
             metrics.on_decoded(slots);
 
             if (ret != 0) {
-                if (n_batch == 1 || ret < 0) {
-                    // if you get here, it means the KV cache is full - try increasing it via the context size
-                    SRV_ERR("failed to decode the batch: KV cache is full - try increasing it via the context size, i = %d, n_batch = %d, ret = %d\n", i, n_batch, ret);
-                    for (auto & slot : slots) {
-                        slot.release();
-                        send_error(slot, "Input prompt is too big compared to KV size. Please try increasing KV size.");
+                {
+                    std::string err;
+
+                    if (n_batch == 1 && ret == 1) {
+                        err = "Context size has been exceeded.";
                     }
-                    break; // break loop of n_batch
+
+                    if (ret == -1) {
+                        err = "Invalid input batch.";
+                    }
+
+                    if (ret < -1) {
+                        err = "Compute error.";
+                    }
+
+                    if (!err.empty()) {
+                        SRV_ERR("%s, i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
+                        for (auto & slot : slots) {
+                            slot.release();
+                            send_error(slot, err);
+                        }
+                        break;
+                    }
                 }
 
                 // retry with half the batch size to try to find a free slot in the KV cache
@@ -3714,6 +3750,7 @@ int main(int argc, char ** argv) {
             "/health",
             "/models",
             "/v1/models",
+            "/api/tags"
         };
 
         // If API key is not set, skip validation
@@ -3752,7 +3789,7 @@ int main(int argc, char ** argv) {
             if (req.path == "/" || tmp.back() == "html") {
                 res.set_content(reinterpret_cast<const char*>(loading_html), loading_html_len, "text/html; charset=utf-8");
                 res.status = 503;
-            } else if (req.path == "/models" || req.path == "/v1/models") {
+            } else if (req.path == "/models" || req.path == "/v1/models" || req.path == "/api/tags") {
                 // allow the models endpoint to be accessed during loading
                 return true;
             } else {
@@ -3895,14 +3932,6 @@ int main(int argc, char ** argv) {
                     {"name",  "predicted_tokens_seconds"},
                     {"help",  "Average generation throughput in tokens/s."},
                     {"value",  res_metrics->n_tokens_predicted ? 1.e3 / res_metrics->t_tokens_generation * res_metrics->n_tokens_predicted : 0.}
-            },{
-                    {"name",  "kv_cache_usage_ratio"},
-                    {"help",  "KV-cache usage. 1 means 100 percent usage."},
-                    {"value",  1. * res_metrics->kv_cache_used_cells / params.n_ctx}
-            },{
-                    {"name",  "kv_cache_tokens"},
-                    {"help",  "KV-cache tokens."},
-                    {"value",  (uint64_t) res_metrics->kv_cache_tokens_count}
             },{
                     {"name",  "requests_processing"},
                     {"help",  "Number of requests processing."},
@@ -4098,6 +4127,19 @@ int main(int argc, char ** argv) {
                     { "llama.context_length", ctx_server.slots.back().n_ctx, },
                 }
             },
+            {"modelfile", ""},
+            {"parameters", ""},
+            {"template", common_chat_templates_source(ctx_server.chat_templates.get())},
+            {"details", {
+                {"parent_model", ""},
+                {"format", "gguf"},
+                {"family", ""},
+                {"families", {""}},
+                {"parameter_size", ""},
+                {"quantization_level", ""}
+            }},
+            {"model_info", ""},
+            {"capabilities", {"completion"}}
         };
 
         res_ok(res, data);
@@ -4423,6 +4465,28 @@ int main(int argc, char ** argv) {
         }
 
         json models = {
+            {"models", {
+                {
+                    {"name", params.model_alias.empty() ? params.model.path : params.model_alias},
+                    {"model", params.model_alias.empty() ? params.model.path : params.model_alias},
+                    {"modified_at", ""},
+                    {"size", ""},
+                    {"digest", ""}, // dummy value, llama.cpp does not support managing model file's hash
+                    {"type", "model"},
+                    {"description", ""},
+                    {"tags", {""}},
+                    {"capabilities", {"completion"}},
+                    {"parameters", ""},
+                    {"details", {
+                        {"parent_model", ""},
+                        {"format", "gguf"},
+                        {"family", ""},
+                        {"families", {""}},
+                        {"parameter_size", ""},
+                        {"quantization_level", ""}
+                    }}
+                }
+            }},
             {"object", "list"},
             {"data", {
                 {
@@ -4432,7 +4496,7 @@ int main(int argc, char ** argv) {
                     {"owned_by", "llamacpp"},
                     {"meta",     model_meta},
                 },
-             }}
+            }}
         };
 
         res_ok(res, models);
@@ -4760,11 +4824,13 @@ int main(int argc, char ** argv) {
     svr->Post("/api/show",            handle_api_show);
     svr->Get ("/models",              handle_models); // public endpoint (no API key check)
     svr->Get ("/v1/models",           handle_models); // public endpoint (no API key check)
+    svr->Get ("/api/tags",            handle_models); // ollama specific endpoint. public endpoint (no API key check)
     svr->Post("/completion",          handle_completions); // legacy
     svr->Post("/completions",         handle_completions);
     svr->Post("/v1/completions",      handle_completions_oai);
     svr->Post("/chat/completions",    handle_chat_completions);
     svr->Post("/v1/chat/completions", handle_chat_completions);
+    svr->Post("/api/chat",            handle_chat_completions); // ollama specific endpoint
     svr->Post("/infill",              handle_infill);
     svr->Post("/embedding",           handle_embeddings); // legacy
     svr->Post("/embeddings",          handle_embeddings);
