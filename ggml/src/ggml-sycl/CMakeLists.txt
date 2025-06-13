@@ -184,6 +184,6 @@ else()
 endif()
 
 if (GGML_SYCL_DEVICE_ARCH)
-    target_compile_options(ggml-sycl PRIVATE -Xsycl-target-backend --offload-new-driver --offload-arch=${GGML_SYCL_DEVICE_ARCH})
-    target_link_options(ggml-sycl PRIVATE -Xsycl-target-backend --offload-new-driver --offload-arch=${GGML_SYCL_DEVICE_ARCH})
+    target_compile_options(ggml-sycl PRIVATE -Xsycl-target-backend -fsycl --offload-new-driver --offload-arch=${GGML_SYCL_DEVICE_ARCH})
+    target_link_options(ggml-sycl PRIVATE -Xsycl-target-backend -fsycl --offload-new-driver --offload-arch=${GGML_SYCL_DEVICE_ARCH})
 endif()
